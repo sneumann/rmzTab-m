@@ -1,0 +1,264 @@
+---
+title: "Reading and writing mzTab-M file format"
+package: rmzTabM
+output:
+  BiocStyle::html_document:
+    toc_float: true
+    includes:
+      in_header: rmzTab-M.bioschemas.html
+vignette: >
+  %\VignetteIndexEntry{Reading and writing mzTab-M file format}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+  %\VignetteDepends{BiocStyle}
+  %\VignettePackage{rmzTabM}
+  %\VignetteKeywords{metabolomics, data format, IO}
+bibliography: references.bib
+csl: biomed-central.csl
+references:
+- id: dummy
+  title: no title
+  author:
+  - family: noname
+    given: noname
+---
+
+```{r biocstyle, echo = FALSE, results = "asis" }
+BiocStyle::markdown()
+```
+
+**Package**: `r Biocpkg("rmzTabM")`<br />
+**Authors**: Steffen Neumann <br />
+**Modified**: `r file.info("rmzTab-M.Rmd")$mtime`<br />
+**Compiled**: `r date()`
+
+```{r init, message = FALSE, echo = FALSE, results = "hide" }
+## Silently loading all packages
+library(BiocStyle)
+library(rmzTabM)
+library(jsonlite)
+
+```
+
+
+# Introduction
+
+This documents describes data import and export.
+
+`rmzTabM` supports 
+
+# Data import: reading mzTab-M JSON 
+
+First we load one of the mzTab-M example files from its JSON representation 
+into an R6 Object
+
+```{r load-libs, message = FALSE }
+
+MTBLS263.mztab.json.path <- system.file("testdata/MTBLS263.mztab.json", package = "rmzTabM")
+f <- file(MTBLS263.mztab.json.path, "rb")
+rmzt <- rmzTabM::MzTab$new()
+rmzt$fromJSON(f)
+close(f)
+
+```
+
+Subsequently we extract some of the metadata:
+
+```{r load-json}
+
+show_ms_run <- function(ms_run) {
+   ms_run[[1]]$location
+}
+
+show_parameter <- function(p, indent="") {
+  return (paste("[", p$cv_label, ",", p$cv_accession, ",", p$name, ",", p$value, "]", sep=""))
+}
+
+show_mztab <- function(mztab) {
+  cat("mzTab file version", mztab$`metadata`$`mzTab-version`, "\n")
+  cat("Created by", show_parameter(mztab$`metadata`$`software`[[1]]$parameter), "\n")
+  cat("With experimental data from \"", mztab$`metadata`$`mzTab-ID`, "\"\n", sep="")
+
+  ## Assays:
+  assay <- mztab$`metadata`$assay
+  id <- sapply(assay, function(a) a$id)
+  name <- sapply(assay, function(a) a$name)
+  cat("With", length(id),"assays:\n")
+  cat(paste("  ID ", id, " => ",name, "\n", sep=""), sep="")
+
+  ## MS Runs
+  ms_runs <- mztab$`metadata`$ms_run
+  filepaths <- sapply(ms_runs, function(mr) mr$location)
+  id <- sapply(ms_runs, function(mr) mr$id)
+  cat("With", length(id),"runs:\n")
+  cat(paste("  ID ", id, " => ",filepaths, "\n", sep=""), sep="")
+
+  ## Samples 
+  samples <- mztab$`metadata`$sample
+  id <- sapply(samples, function(s) s$id)
+  name <- sapply(samples, function(s) s$name)
+  cat("With", length(id),"samples:\n")
+  cat(paste("  ID ", id, " => ", name, "\n", sep=""), sep="")
+}
+
+show_mztab(rmzt)
+
+```
+
+Now we create an mzTab object from xcms information. The faahKO package has an `XCMSnExp` object to use.
+
+```{r create-from-xcms}
+library(httr)
+library(rmzTabM)
+library(xcms)
+library(faahKO)
+data(faahko3)
+
+## known type ids = [Assay, CV, Contact, Database, Instrument, MsRun, Parameter, Publication, Sample, SampleProcessing, Software, StudyVariable, Uri]
+
+ms_runs <- mapply(function(id, location) {
+  MsRun$new(elementType="MsRun", id=id, location=location, 
+            scan_polarity=list(Parameter$new(elementType="Parameter", id=1, cv_label="MS",
+                                             cv_accession="MS:1000130", name="positive scan", value="3.1.1")))}
+  , seq(1,nrow(pData(faahko3))), processingData(faahko3)@files)
+
+samples <- mapply(function(id, name) {
+  Sample$new(elementType="Sample", id=id, name=name)}, 
+  seq(1,nrow(pData(faahko3))), pData(faahko3)$sample_name)
+
+assays <- mapply(function(id, name) 
+  Assay$new(elementType="Assay", id=id, name=name, 
+            ms_run_ref=c(MsRun$new(elementType="MsRun", id=id, 
+                                   location=processingData(faahko3)@files[as.integer(id)], 
+                                   scan_polarity=list(Parameter$new(elementType="Parameter", id=1, 
+                                                                    cv_label="MS", cv_accession="MS:1000130", 
+                                                                    name="positive scan", value="3.1.1"))))),
+                 seq(1,nrow(pData(faahko3))), pData(faahko3)$sample_name)
+
+softwares <- list(Software$new(elementType="Software", id=1,  
+                               parameter=Parameter$new(elementType="Parameter", id=1, 
+                                                       cv_label="MS", cv_accession="MS:1001582", name="XCMS", value=as.character(packageVersion("xcms")))))
+
+cvs <- list(CV$new(elementType="CV", id=1, label="MS", 
+                   full_name="PSI-MS controlled vocabulary", version="4.0.9",
+                   uri="https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo"))
+
+databases <- c(Database$new(elementType = "Database", id=1, prefix = "MB", uri = "https://www.massbank.eu/", version = "20200401", 
+                            param = Parameter$new(elementType="Parameter", id=1, 
+                                                       cv_label="MS", cv_accession="MS:1001582", name="XCMS", value=as.character(packageVersion("xcms")))))
+
+study_variables <- mapply(function(id, level, groupassays) 
+  StudyVariable$new(elementType="StudyVariable", id=id, name=level, description=level, assay_refs=groupassays),
+  seq(1:length(unique(phenoData(faahko3)$sample_group))),
+  unique(phenoData(faahko3)$sample_group),
+  lapply(unique(phenoData(faahko3)$sample_group), 
+         function(group) assays[which(phenoData(faahko3)$sample_group==group)]))
+
+metadata=Metadata$new(
+  #prefix = "MTD",
+  'mzTab-version' = "2.2.0-M",
+  'mzTab-ID' = "faahKO",
+  title = "faahKO",
+  description = "faahKO",
+  #sample_processing = "Just do it",
+  #instrument = "Some TripleQ",
+  software=softwares,
+  assay=assays,
+  sample=samples,
+  ms_run=ms_runs,
+  study_variable = study_variables,
+  'quantification_method' = Parameter$new(elementType="Parameter", id=1, cv_label="MS", cv_accession="MS:4711", name="xcms", value="3.1.1"),
+  'small_molecule-quantification_unit' = Parameter$new(elementType="Parameter", id=1, cv_label="MS", cv_accession="MS:4711", name="xcms", value="3.1.1"),
+  'small_molecule_feature-quantification_unit' = Parameter$new(elementType="Parameter", id=1, cv_label="MS", cv_accession="MS:4711", name="xcms", value="3.1.1"),
+  'small_molecule-identification_reliability' = Parameter$new(elementType="Parameter", id=1, cv_label="MS", cv_accession="MS:4711", name="xcms", value="3.1.1"),
+  cv=cvs,
+  database=databases
+)
+
+i <- 1
+
+featureDefs <- featureDefinitions(faahko3)
+
+abundance_assay <- t(featureValues(faahko3))
+abundance_studyvariable <- aggregate(abundance_assay, by=list(phenoData(faahko3)$sample_group), FUN=mean)
+abundance_variation_studyvariable <- aggregate(abundance_assay, by=list(phenoData(faahko3)$sample_group), FUN=var)
+  
+
+small_molecules <- c(SmallMoleculeSummary$new(
+  sml_id = i,
+  reliability = "1",
+  abundance_assay = as.character(abundance_assay[,i]),
+  abundance_study_variable = as.character(abundance_studyvariable[,i+1]),
+  abundance_variation_study_variable = as.character(abundance_variation_studyvariable[,i+1])
+  ))
+
+small_features <- c(SmallMoleculeFeature$new(
+  smf_id = i,
+  exp_mass_to_charge = featureDefs[i,"mzmed"],
+  charge = 1,
+  abundance_assay = as.character(abundance_assay[,i])
+  ))
+
+small_evidence <- c(SmallMoleculeEvidence$new(
+  sme_id = i,
+  database_identifier = "Molecule",
+  evidence_input_id = "splash10-000i-4900000000-a60a480f1340558740a2",
+#  spectra_ref = c(NULL),
+  exp_mass_to_charge = featureDefs[i,"mzmed"],
+  theoretical_mass_to_charge = featureDefs[i,"mzmed"],
+  charge = 1,
+  identification_method = Parameter$new(elementType="Parameter", id=1, cv_label="MS",
+                                             cv_accession="MS:1000130", name="positive scan", value="3.1.1"),
+  rank=1,
+  ms_level = Parameter$new(elementType="Parameter", id=1, cv_label="MS",
+                                             cv_accession="MS:1000130", name="positive scan", value="3.1.1")
+))
+
+faahkoMzTab <- rmzTabM::MzTab$new(metadata = metadata,
+                                  smallMoleculeSummary = small_molecules,
+                                  smallMoleculeFeature = small_features,
+                                  smallMoleculeEvidence = small_evidence)
+
+cat(faahkoMzTab$toJSONString(), file="/tmp/faahko3.mzTab.json")
+
+url <- ("https://apps.lifs.isas.de/mztabvalidator/rest/v2/validate?level=info&maxErrors=100&semanticValidation=true")
+resp <- POST(url, body = faahkoMzTab$toJSONString(), content_type_json())
+resp$status
+content(resp)
+sapply(content(resp), function(x) x$message)
+
+
+
+
+
+
+
+
+
+
+## Validation at https://apps.lifs.isas.de/mztabvalidator/swagger-ui.html#/validate
+## 
+```
+
+Next, we can create an MSnbase::MzTab object from the rmzTabM::MzTab object:
+
+```{r create-from-xcms}
+
+library(MSnbase)
+
+
+
+
+writeMzTab(outMzTab, "/tmp/faahko3-rmzt.mzTab")
+
+
+```
+
+
+```{r sessionInfo}
+sessionInfo()
+```
+
+
+
+# References
